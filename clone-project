@@ -149,6 +149,7 @@ def fork_gh_repo(config, repo_url, upstream, origin):
     except UnknownObjectException:
         upstream_repo = g.get_repo('{0}/{1}'.format(repo_url.owner, repo_url.repo))
         user = g.get_user()
+        should_i_fork = 'y'
         if config['prompt_before_forking'] in ['yes', 'y', 'True', 'true', True]:
             should_i_fork = input("Do you want to fork the repo under user {0}? [y]: (y/n) ".format(config['github_user'])) or 'y'
         if should_i_fork == 'y':
