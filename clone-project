@@ -1,0 +1,162 @@
+#!/usr/bin/env python
+
+import os
+import copy
+import argparse
+
+errors = []
+
+try:
+    import yaml
+except ImportError:
+    errors.append("You must have PyYAML installed (pip install pyyaml)")
+
+try:
+    import git
+except ImportError:
+    errors.append("You must have GitPython installed (pip install gitpython)")
+
+try:
+    from giturlparse import parse
+except ImportError:
+    errors.append("You must have giturlparse.py installed (pip install giturlparse.py)")
+
+try:
+    from github import Github, UnknownObjectException
+except ImportError:
+    errors.append("You must have PyGithub installed (pip install pygithub)")
+
+try:
+    input = raw_input
+except NameError:
+    pass
+
+HOME_DIR = os.path.expanduser('~')
+DEFAULT_CONFIG = {
+    'directory_prefix': os.path.join(HOME_DIR, 'projects'),
+    'github_user': None,
+    'github_access_token': None,
+    'prompt_before_forking': "yes"
+}
+
+
+def main():
+    if errors:
+        msg = "Missing python dependencies:"
+        for error in errors:
+            msg += ("\n\t" + error)
+        raise SystemExit(msg)
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("repository", type=str)
+    args = parser.parse_args()
+    repo_url = parse(args.repository)
+    if not repo_url.valid:
+        raise SystemExit("{0} is not a valid git repository URL".format(args.repository))
+
+    config = load_config()
+
+    cloned_repo = clone_repo(config, repo_url)
+
+    if repo_url.owner != config['github_user']:
+        set_remotes(config, cloned_repo)
+        if repo_url.github:
+            fork_gh_repo(config, repo_url, cloned_repo.remote('upstream'), cloned_repo.remote('origin'))
+
+
+def load_config():
+    filename = 'project_cloner.yaml'
+    default_location = os.path.join(HOME_DIR, '.{0}'.format(filename))
+    for prefix in ['{0}', default_location, os.path.join(HOME_DIR, '.config', '{0}')]:
+        try:
+            path = prefix.format(filename)
+            with open(path, 'r') as f:
+                print('Loaded config from {0}'.format(path))
+                config = yaml.safe_load(f)
+                if not validate_config(config):
+                    print("{0} was not a valid config file, falling back to initial configuration".format(path))
+                    defaults = copy.copy(DEFAULT_CONFIG)
+                    defaults.update(config)
+                    return initial_config(defaults, path)
+                return config
+        except IOError:
+            pass
+    return initial_config(DEFAULT_CONFIG, default_location)
+
+
+def validate_config(config):
+    for key in ['directory_prefix', 'github_user', 'github_access_token']:
+        if not config.get(key):
+            return False
+    return True
+
+
+def initial_config(defaults, config_file):
+    config = {}
+    print('Initial Configuration:')
+    for k, v in defaults.items():
+        config[k] = input('{0} [{1}]: '.format(k, v)) or v
+
+    if not validate_config(config):
+        print("Configuration not valid, falling back to initial configuration")
+        return initial_config(defaults, config_file)
+
+    with open(config_file, 'w') as f:
+        f.write(yaml.safe_dump(config, default_flow_style=False))
+
+    print("Saved config to {0}".format(config_file))
+
+    return config
+
+
+def clone_repo(config, repo_url):
+    parent_dir = os.path.join(config['directory_prefix'], repo_url.domain, repo_url.owner)
+    if not os.path.exists(parent_dir):
+        os.makedirs(parent_dir)
+        print("Created path {0}".format(parent_dir))
+    repo_dir = os.path.join(parent_dir, repo_url.repo)
+
+    try:
+        cloned_repo = git.Repo.clone_from(repo_url.url2ssh, repo_dir)
+        print("Cloned repo from {0} to {1}".format(repo_url.url2ssh, repo_dir))
+    except git.GitCommandError:
+        cloned_repo = git.Repo(repo_dir)
+        print("Using existing repo at {0}".format(repo_dir))
+
+    return cloned_repo
+
+
+def set_remotes(config, cloned_repo):
+    if len(cloned_repo.remotes) > 1:
+        print("Remotes have been manually altered in this repo, not updating configuration")
+        return cloned_repo.remote('origin')
+    upstream = cloned_repo.remote()
+    upstream.rename('upstream')
+    print("Renamed remote at url {0} to 'upstream'".format(upstream.url))
+    my_repo_url = parse(upstream.url)
+    my_repo_url._parsed['owner'] = config['github_user']
+    my_repo_url._parsed['domain'] = "github.com"
+    my_repo_url._parsed['platform'] = "github.com"
+    origin = git.Remote.add(cloned_repo, 'origin', my_repo_url.url2ssh)
+    return origin
+
+
+def fork_gh_repo(config, repo_url, upstream, origin):
+    g = Github(config['github_access_token'])
+    try:
+        g.get_repo('{0}/{1}'.format(config['github_user'], repo_url.repo))
+        print("Repo {0} already exists for user {1} on Github".format(config['github_user'], repo_url.repo))
+    except UnknownObjectException:
+        upstream_repo = g.get_repo('{0}/{1}'.format(repo_url.owner, repo_url.repo))
+        user = g.get_user()
+        if config['prompt_before_forking'] in ['yes', 'y', 'True', 'true', True]:
+            should_i_fork = input("Do you want to fork the repo under user {0}? [y]: (y/n) ".format(config['github_user'])) or 'y'
+        if should_i_fork == 'y':
+            user.create_fork(upstream_repo)
+            print("Created fork of repository '{0}' for user {1}".format(upstream_repo.full_name, user.login))
+        else:
+            print("Skipping fork of repository")
+
+
+if __name__ == '__main__':
+    main()
